@@ -1,14 +1,9 @@
-.devcontainer
-.vscode
 build/
 components/
 managed_components/
 logs/
-CMakeLists.txt
 dependencies.lock
 ESP32_IntelliVerter_Washing_Machine.code-workspace
 LCD*
 log*
 partitions.csv
-README.md
-sdk*
