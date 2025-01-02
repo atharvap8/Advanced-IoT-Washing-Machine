@@ -2,6 +2,7 @@ build/
 components/
 managed_components/
 logs/
+main/credentials.h
 dependencies.lock
 ESP32_IntelliVerter_Washing_Machine.code-workspace
 LCD*
