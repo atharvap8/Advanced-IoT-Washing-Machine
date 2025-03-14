@@ -884,7 +884,7 @@ void setup()
   level.begin(WLS_DATA, WLS_CLK);
   Serial.println("Pre-Init WLS Reading:");
   Serial.println(level.get_units(), 2);
-  level.set_scale(3100.f);
+  level.set_scale();
   Serial.println("Post-Init WLS Reading:");
   Serial.println(level.get_units(), 2);
   Serial.println("WLS Initialised.............");

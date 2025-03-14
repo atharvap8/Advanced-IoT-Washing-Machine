@@ -8,3 +8,7 @@ ESP32_IntelliVerter_Washing_Machine.code-workspace
 LCD*
 log*
 partitions.csv
+debug.log
+diagram.json
+wokwi.toml
+wokwigw.exe
