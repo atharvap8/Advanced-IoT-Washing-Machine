@@ -67,6 +67,7 @@ UniversalTelegramBot telegram(BOT_TOKEN, secured_client);
 TaskHandle_t ledtask_handle = NULL;
 LiquidCrystal_I2C display(I2C_ADDR, DISPLAY_COLS, DISPLAY_ROWS);
 
+bool isSimulation = false;
 bool isSoaking = false;
 bool isWashing = false;
 bool isRinsing = false;
@@ -884,7 +885,13 @@ void setup()
   level.begin(WLS_DATA, WLS_CLK);
   Serial.println("Pre-Init WLS Reading:");
   Serial.println(level.get_units(), 2);
-  level.set_scale();
+  if (isSimulation)
+  {
+    level.set_scale();
+  } 
+  else {
+    level.set_scale(3100.f);
+  }
   Serial.println("Post-Init WLS Reading:");
   Serial.println(level.get_units(), 2);
   Serial.println("WLS Initialised.............");

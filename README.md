@@ -1,6 +1,6 @@
 
 
-# Smart Washing Machine Controller
+# Advanced IoT Washing Machine Controller
 
 A DIY IoT project that transforms a standard washing machine into a smart, Alexa-controlled appliance with real-time Telegram feedback.
 
@@ -18,7 +18,7 @@ A DIY IoT project that transforms a standard washing machine into a smart, Alexa
 ## How It Works
 The ESP32 handles user inputs, motor operations, and wireless communication. Additional components like relays, buck converters, and an inverter drive ensure smooth functionality.
 
-For detailed assembly, schematics, and programming instructions, visit the project page: [Alexa Washing Machine](https://atharvap8.github.io/posts/2024/06/alexa-washing-machine/).
+For detailed assembly, schematics, and programming instructions, visit the project page: [Alexa Washing Machine](https://atharvap8.github.io/posts/2024/06/advanced-iot-washing-machine/).
 
 
 ## Folder contents
