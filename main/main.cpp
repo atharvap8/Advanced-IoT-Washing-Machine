@@ -1,15 +1,12 @@
 
 /* To-Do
-• LCD Integration {Check}
-• Wash, Rinse, Spin Button {Check}
-• Wash, Rinse, Spin, Soak LEDs {Check}
-• Add LED Power Button
-• Add Emergency Inverter OFF Button
-• Wifi Status LED {Check}
-• Display Print Statements
-• Control Logic
-• Standalone Program LED Lightup
-• CountDown Timer Integration {}
+Make sure to check whether isSimulation is set to true or false.
+If true, the HX711 will be set to a default scale value.
+If false, the HX711 will be set to the scale value obtained from calibration.
+
+Modify the credentials.h file to include the Telegram Bot Token and Chat ID, and 
+ensure that the WiFi credentials are correct.
+
 
 
 */
@@ -54,8 +51,7 @@
 #define DISPLAY_ROWS 4
 #define OFF LOW
 #define ON HIGH
-#define BOT_TOKEN "6832887486:AAFgPAgZFV2qECq_RNY6XItXJEyK8nN4-9A"
-#define CHAT_ID "1403405625"
+
 
 HX711 level;
 float waterLevel;
