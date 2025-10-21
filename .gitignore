@@ -1,14 +1,13 @@
 .devcontainer/*
 .vscode/*
 build/*
-main/c*
 components/*
 managed_components/*
-.cl*
-dep*
-CM*
-LC*
-lo*
+.clangd
+Advanced IoT Washing Machine.code-workspace
+CMake*
+d*
+L*
+log*
 p*
-s*
-
+sdk*
