@@ -1,7 +1,7 @@
 .devcontainer/*
 .vscode/*
 build/*
-main/cred*
+main/c*
 components/*
 managed_components/*
 .cl*

@@ -6,7 +6,7 @@ If false, the HX711 will be set to the scale value obtained from calibration.
 
 Modify the credentials.h file to include the Telegram Bot Token and Chat ID, and 
 ensure that the WiFi credentials are correct.
-
+! Implement Test Mode (Hybrid) (Telegram - HW Control)
 
 
 */
@@ -14,9 +14,8 @@ ensure that the WiFi credentials are correct.
 #include <WiFi.h>
 #include <HX711.h>
 #include <Arduino.h>
-#include <Espalexa.h> 
-#include <WebServer.h>
 #include <WiFiClient.h>
+#include <WebServer.h>
 #include <ElegantOTA.h>
 #include "credentials.h"
 #include <freertos/task.h>
@@ -47,8 +46,8 @@ ensure that the WiFi credentials are correct.
 #define RINSE_BTN 0
 #define SPIN_BTN 35
 #define I2C_ADDR 0x27
-#define DISPLAY_COLS 20
-#define DISPLAY_ROWS 4
+#define DISPLAY_COLS 16
+#define DISPLAY_ROWS 2
 #define OFF LOW
 #define ON HIGH
 
@@ -56,7 +55,6 @@ ensure that the WiFi credentials are correct.
 HX711 level;
 float waterLevel;
 float tareWaterLevel;
-Espalexa espalexa;
 WebServer server(1906);
 WiFiClientSecure secured_client;
 UniversalTelegramBot telegram(BOT_TOKEN, secured_client);
@@ -84,7 +82,7 @@ volatile float totalWaterUsed = 0;
 volatile int selectedMode = 0; // 1 for WASH, 2 for RINSE, 3 for SPIN
 const int multiplier = 27.4;
 const int offset = 10.9;
-const int setFillingWaterLevel = 18;
+const int setFillingWaterLevel = 18.5;
 const int setDrainingWaterLevel = 2;
 const int waitTime = 10000;
 unsigned long runTime = 0;
@@ -93,21 +91,27 @@ unsigned long startWaitTime = 0;
 unsigned long ota_progress_millis = 0;
 unsigned long lastButtonPressTime = 0;
 
+/* -------------------- Engineering Mode Variables ---------------------- */
+bool isTestMode = false;
+int testMenuOption = 0; 
+const String ENGINEERING_COMMAND = "engineering";
+const String ENGINEERING_EXIT = "exit";
+unsigned long lastTelegramCheck = 0;
+const unsigned long telegramCheckDelay = 1000; 
 
-void firstLightChanged(uint8_t brightness);
-void secondLightChanged(uint8_t brightness);
-void thirdLightChanged(uint8_t brightness);
-void fourthLightChanged(uint8_t brightness);
-void fifthLightChanged(uint8_t brightness);
+// ========== VALVE TEST Variables ==========
+const float VALVE_TEST_DURATION = 30000;  // 30 seconds in milliseconds
+const float VALVE_TEST_MIN_DELTA = 2.0;   // Minimum water level increase (Liters) for PASS
+const float VALVE_TEST_SAMPLE_INTERVAL = 1000;  // Sample every 1 second
+const int VALVE_TEST_SAMPLES = VALVE_TEST_DURATION / VALVE_TEST_SAMPLE_INTERVAL;
 
-String Device1 = "Wash";
-String Device2 = "Rinse";
-String Device3 = "Spin";
-String Device4 = "Complete Wash";
-String Device5 = "Soak";
+// ========== Drain Motor Test Variables ==========
+bool awaitingDrainMotorResponse = false;
+bool drainMotorTestResult = false; // true = smooth, false = stuck
+
+/* -------------------- Engineering Mode Variables ---------------------- */
 
 // Interrupt Management
-
 void IRAM_ATTR washButtonISR()
 {
   if (!programRunning)
@@ -118,25 +122,30 @@ void IRAM_ATTR washButtonISR()
   }
 }
 
-void IRAM_ATTR rinseButtonISR()
-{
-  if (!programRunning)
-  {
+void IRAM_ATTR spinButtonISR() {
+  if (awaitingDrainMotorResponse) {
+    // User pressed SPIN = Motor working smoothly
+    drainMotorTestResult = true;
+    awaitingDrainMotorResponse = false;
+  } else if (!programRunning) {
+    selectedMode = 3;
+    lastButtonPressTime = millis();
+    buttonPressed = true;
+  }
+}
+
+void IRAM_ATTR rinseButtonISR() {
+  if (awaitingDrainMotorResponse) {
+    // User pressed RINSE = Motor stuck/failed
+    drainMotorTestResult = false;
+    awaitingDrainMotorResponse = false;
+  } else if (!programRunning) {
     selectedMode = 2;
     lastButtonPressTime = millis();
     buttonPressed = true;
   }
 }
 
-void IRAM_ATTR spinButtonISR()
-{
-  if (!programRunning)
-  {
-    selectedMode = 3;
-    lastButtonPressTime = millis();
-    buttonPressed = true;
-  }
-}
 
 void IRAM_ATTR compButtonISR()
 {
@@ -157,7 +166,7 @@ void IRAM_ATTR haltButtonISR()
 
 void ledtask(void *parameter)
 {
-  for (;;)
+  while (true)
   {
     if (isSoaking)
     {
@@ -235,7 +244,11 @@ void ledtask(void *parameter)
       digitalWrite(RINSE_LED, OFF);
       digitalWrite(SPIN_LED, OFF);
       digitalWrite(WASH_LED, OFF);
+
+      vTaskDelay(pdMS_TO_TICKS(100));
+      continue;
     }
+    vTaskDelay(pdMS_TO_TICKS(50));
   }
 }
 
@@ -354,12 +367,12 @@ void washLogic()
   display.setCursor(8, 1);
   display.print(waterLevel, 1);
   digitalWrite(IV, OFF);
-  digitalWrite(DM_WASH, ON);
+  digitalWrite(DM_WASH, OFF);
   vTaskDelay(3000 / portTICK_PERIOD_MS);
   digitalWrite(INV_PW, ON);
   display.clear();
   display.setCursor(1, 0);
-  display.print("Washing... P1");
+  display.print("Washing... PH1");
 
   unsigned long washPhase1Duration = 180000;
   unsigned long washPhase1StartTime = millis();
@@ -410,7 +423,7 @@ void washLogic()
   digitalWrite(IV, OFF);
   display.clear();
   display.setCursor(1, 0);
-  display.print("Washing... P2");
+  display.print("Washing... PH2");
   digitalWrite(INV_PW, ON);
 
   unsigned long washPhase2Duration = 180000;
@@ -685,124 +698,6 @@ void soakLogic()
   programRunning = false;
 }
 
-// Alexa Stuff
-
-void firstLightChanged(uint8_t brightness)
-{
-
-  if (brightness == 255)
-  {
-    Serial.println("Starting Wash Program.....");
-    isSoaking = false;
-    isWashing = true;
-    isRinsing = false;
-    isSpinning = false;
-    washLogic();
-    isSoaking = false;
-    isWashing = false;
-    isRinsing = false;
-    isSpinning = false;
-    spinLogic();
-  }
-}
-
-void secondLightChanged(uint8_t brightness)
-{
-
-  if (brightness == 255)
-  {
-    Serial.println("Starting Rinse Program.....");
-    startTime = millis();
-    isSoaking = false;
-    isWashing = false;
-    isRinsing = true;
-    isSpinning = false;
-    rinseLogic();
-    isSoaking = false;
-    isWashing = false;
-    isRinsing = false;
-    isSpinning = true;
-    spinLogic();
-    isSoaking = false;
-    isWashing = false;
-    isRinsing = false;
-    isSpinning = false;
-  }
-}
-
-void thirdLightChanged(uint8_t brightness)
-{
-
-  if (brightness == 255)
-  {
-    Serial.println("Starting Spin Program.....");
-    startTime = millis();
-    isSoaking = false;
-    isWashing = false;
-    isRinsing = false;
-    isSpinning = true;
-    spinLogic();
-    isSoaking = false;
-    isWashing = false;
-    isRinsing = false;
-    isSpinning = false;
-  }
-}
-
-void fourthLightChanged(uint8_t brightness)
-{
-
-  if (brightness == 255)
-  {
-    telegram.sendMessage(CHAT_ID, "Complete Wash Started", "");
-        startTime = millis();
-        isCompleteProgramWash = true;
-        isCompleteProgramRinse = false;
-        isCompleteProgramSpin = false;
-        washLogic();
-        telegram.sendMessage(CHAT_ID, "Washing Complete", "");
-        spinLogic();
-        isCompleteProgramWash = false;
-        isCompleteProgramRinse = true;
-        isCompleteProgramSpin = false;
-        rinseLogic();
-        isCompleteProgramWash = false;
-        isCompleteProgramRinse = false;
-        isCompleteProgramSpin = true;
-        telegram.sendMessage(CHAT_ID, "Rinsing Complete", "");
-        spinLogic();
-        isCompleteProgramWash = false;
-        isCompleteProgramRinse = false;
-        isCompleteProgramSpin = false;
-        telegram.sendMessage(CHAT_ID, "Spinning Complete", "");
-        totalWaterUsed = washWaterUsed + rinseWaterUsed;
-        delay(10);
-        String message1 = "Total Water Used:" + String(totalWaterUsed) + " L";
-        telegram.sendMessage(CHAT_ID, message1, "");
-        delay(10);
-        runTime = millis() - startTime;
-        String message2 = "Program Complete. Total Runtime:  " + String(runTime / 60000) + " Minutes";
-        telegram.sendMessage(CHAT_ID, message2, "");
-  }
-}
-
-void fifthLightChanged(uint8_t brightness)
-{
-  if (brightness == 255)
-  {
-    Serial.println("Starting Soak.....");
-    isSoaking = true;
-    isWashing = false;
-    isRinsing = false;
-    isSpinning = false;
-    soakLogic();
-    isSoaking = false;
-    isWashing = false;
-    isRinsing = false;
-    isSpinning = false;
-  }
-}
-
 boolean connectWifi()
 {
   boolean state = true;
@@ -849,6 +744,571 @@ boolean connectWifi()
   }
   return state;
 }
+
+
+/* ----------------  TEST CODEBLOCK AREA  -------------------- */
+
+void performSensorTest() {
+  telegram.sendMessage(CHAT_ID, "🔍 Running Sensor Test...", "");
+  
+  String msg = "📊 *SENSOR TEST RESULTS*\n\n";
+  
+  // Water Level Sensor
+  tareWaterLevel = level.get_units() / multiplier;
+  waterLevel = tareWaterLevel - offset;
+  msg += "💧 Water Level: " + String(waterLevel, 2) + " L\n";
+  
+  // Feedback Signal
+  int fbSignal = digitalRead(FB_SIG);
+  msg += "📡 Feedback Signal: " + String(fbSignal ? "HIGH ✅" : "LOW ❌") + "\n";
+  
+  // Button States
+  msg += "\n🎛️ *Button States:*\n";
+  msg += "WASH: " + String(digitalRead(WASH_BTN) == LOW ? "PRESSED" : "RELEASED") + "\n";
+  msg += "RINSE: " + String(digitalRead(RINSE_BTN) == LOW ? "PRESSED" : "RELEASED") + "\n";
+  msg += "SPIN: " + String(digitalRead(SPIN_BTN) == LOW ? "PRESSED" : "RELEASED") + "\n";
+  msg += "COMP: " + String(digitalRead(COMP_BTN) == LOW ? "PRESSED" : "RELEASED") + "\n";
+  msg += "HALT: " + String(digitalRead(HALT_BTN) == LOW ? "PRESSED" : "RELEASED") + "\n";
+  
+  // Raw HX711 reading
+  msg += "\n📈 Raw HX711: " + String(level.get_units(), 2) + "\n";
+  msg += "Multiplier: " + String(multiplier) + "\n";
+  msg += "Offset: " + String(offset) + "\n";
+  
+  telegram.sendMessage(CHAT_ID, msg, "Markdown");
+}
+
+/* ----------------  Inlet Valve Test Logic  -------------------- */
+
+float getCurrentWaterLevel() {
+  // Take multiple readings and average them for accuracy
+  float total = 0;
+  int readings = 5;
+  
+  for (int i = 0; i < readings; i++) {
+    tareWaterLevel = level.get_units() / multiplier;
+    waterLevel = tareWaterLevel - offset;
+    total += waterLevel;
+    delay(50);
+  }
+  
+  return total / readings;
+}
+
+String generateValveTestReport(float initialLevel, float finalLevel, float totalDelta, float flowRate, bool passed, float* readings, int sampleCount) {
+  String report = passed ? "✅ *VALVE TEST PASSED*\n\n" : "❌ *VALVE TEST FAILED*\n\n";
+  
+  // Summary
+  report += "📊 *Test Summary:*\n";
+  report += "Initial Level: " + String(initialLevel, 2) + " L\n";
+  report += "Final Level: " + String(finalLevel, 2) + " L\n";
+  report += "Water Added: " + String(totalDelta, 2) + " L\n";
+  report += "Flow Rate: " + String(flowRate * 60, 1) + " L/min\n";
+  report += "Duration: 30 seconds\n\n";
+  
+  // Pass/Fail analysis
+  report += "🎯 *Analysis:*\n";
+  report += "Required: ≥" + String(VALVE_TEST_MIN_DELTA, 1) + " L\n";
+  report += "Actual: " + String(totalDelta, 2) + " L\n";
+  
+  if (passed) {
+    report += "Status: VALVE WORKING ✅\n";
+    if (totalDelta > 8.0) {
+      report += "Note: High flow rate detected\n";
+    } else if (totalDelta < 3.0) {
+      report += "Note: Low flow rate (check filters)\n";
+    }
+  } else {
+    report += "Status: VALVE FAULT ❌\n";
+    if (totalDelta < 0.5) {
+      report += "Possible Issues:\n";
+      report += "• Valve stuck closed\n";
+      report += "• No water supply\n";
+      report += "• Electrical connection fault\n";
+    } else {
+      report += "Possible Issues:\n";
+      report += "• Partially blocked valve\n";
+      report += "• Low water pressure\n";
+      report += "• Sensor calibration needed\n";
+    }
+  }
+  
+  // Add trend analysis if enough samples
+  if (sampleCount > 10) {
+    report += "\n📈 *Flow Trend:*\n";
+    float midPoint = readings[sampleCount/2] - initialLevel;
+    float trend = (totalDelta - midPoint) / midPoint * 100;
+    
+    if (trend > 10) {
+      report += "Increasing flow rate\n";
+    } else if (trend < -10) {
+      report += "Decreasing flow rate\n";
+    } else {
+      report += "Steady flow rate\n";
+    }
+  }
+  
+  return report;
+}
+
+
+void inletValveTest() {
+  telegram.sendMessage(CHAT_ID, "🚰 *WATER INLET VALVE AUTO-TEST*\nStarting 30-second test...", "Markdown");
+  
+  // Safety check - ensure tank is not overfull
+  float initialLevel = getCurrentWaterLevel();
+  
+  if (initialLevel > 15.0) { // Prevent overflow
+    String msg = "⚠️ *TEST ABORTED*\nWater level too high: " + String(initialLevel, 1) + "L\n";
+    msg += "Please drain tank below 15L before testing.";
+    telegram.sendMessage(CHAT_ID, msg, "Markdown");
+    return;
+  }
+  
+  // Initialize test variables
+  float waterLevelReadings[VALVE_TEST_SAMPLES];
+  unsigned long testStartTime = millis();
+  int sampleIndex = 0;
+  
+  String progressMsg = "📊 *TEST IN PROGRESS*\n";
+  progressMsg += "Initial Level: " + String(initialLevel, 2) + "L\n";
+  progressMsg += "Duration: 30s | Min Delta: " + String(VALVE_TEST_MIN_DELTA, 1) + "L\n\n";
+  progressMsg += "🔄 Opening valve...";
+  telegram.sendMessage(CHAT_ID, progressMsg, "Markdown");
+  
+  // Open the inlet valve
+  digitalWrite(IV, ON);
+  
+  // Collect samples during test
+  while ((millis() - testStartTime) < VALVE_TEST_DURATION && sampleIndex < VALVE_TEST_SAMPLES) {
+    float currentLevel = getCurrentWaterLevel();
+    waterLevelReadings[sampleIndex] = currentLevel;
+    
+    // Send progress update every 5 seconds
+    if (sampleIndex % 5 == 0) {
+      float deltaLevel = currentLevel - initialLevel;
+      int secondsElapsed = (millis() - testStartTime) / 1000;
+      int secondsRemaining = 30 - secondsElapsed;
+      
+      String update = "📈 *Progress Update*\n";
+      update += "Time: " + String(secondsElapsed) + "s / 30s\n";
+      update += "Current: " + String(currentLevel, 2) + "L\n";
+      update += "Delta: " + String(deltaLevel, 2) + "L\n";
+      update += "Remaining: " + String(secondsRemaining) + "s";
+      telegram.sendMessage(CHAT_ID, update, "Markdown");
+    }
+    
+    sampleIndex++;
+    delay(VALVE_TEST_SAMPLE_INTERVAL);
+  }
+  
+  // Close the valve
+  digitalWrite(IV, OFF);
+  
+  // Analyze results
+  float finalLevel = getCurrentWaterLevel();
+  float totalDelta = finalLevel - initialLevel;
+  float averageFlowRate = totalDelta / (VALVE_TEST_DURATION / 1000.0); // L/s
+  bool testPassed = (totalDelta >= VALVE_TEST_MIN_DELTA);
+  
+  // Generate detailed report
+  String report = generateValveTestReport(initialLevel, finalLevel, totalDelta, averageFlowRate, testPassed, waterLevelReadings, sampleIndex);
+  telegram.sendMessage(CHAT_ID, report, "Markdown");
+  
+  // Log to serial for debugging
+  Serial.println("=== VALVE TEST COMPLETE ===");
+  Serial.printf("Initial: %.2fL, Final: %.2fL, Delta: %.2fL\n", initialLevel, finalLevel, totalDelta);
+  Serial.printf("Flow Rate: %.3fL/s, Result: %s\n", averageFlowRate, testPassed ? "PASS" : "FAIL");
+}
+
+/* ----------------  Inlet Valve Test Logic  -------------------- */
+
+/* ----------------  Drain Motor Test Logic  -------------------- */
+
+void generateDrainMotorReport(bool passed) {
+  display.clear();
+  display.setCursor(0, 0);
+  display.print(passed ? "Motor: PASS" : "Motor: FAIL");
+  display.setCursor(0, 1);
+  display.print(passed ? "Working OK" : "Brake Stuck");
+  delay(3000);
+  
+  String report = "";
+  
+  if (passed) {
+    // Motor working correctly
+    report = "✅ *DRAIN MOTOR TEST - PASSED*\n\n";
+    report += "🎯 *Test Result:*\n";
+    report += "Drum rotates smoothly when brake is engaged.\n\n";
+    report += "✔️ *Status:* Motor brake functioning correctly\n";
+    report += "✔️ Motor coil resistance normal\n";
+    report += "✔️ Brake mechanism releases properly\n";
+    report += "✔️ No mechanical obstruction\n\n";
+    report += "💡 *Recommendation:*\n";
+    report += "Motor is in good working condition. No action needed.";
+    
+  } else {
+    // Motor failed test
+    report = "❌ *DRAIN MOTOR TEST - FAILED*\n\n";
+    report += "🎯 *Test Result:*\n";
+    report += "Drum is difficult or impossible to rotate manually.\n\n";
+    report += "⚠️ *Possible Causes:*\n";
+    report += "1. Brake not releasing\n";
+    report += "   → Check motor coil connections\n";
+    report += "   → Measure coil resistance (should be ~100-300Ω)\n\n";
+    report += "2. Mechanical seizure\n";
+    report += "   → Bearing failure\n";
+    report += "   → Foreign object in drum\n";
+    report += "   → Belt too tight\n\n";
+    report += "3. Electrical fault\n";
+    report += "   → Motor not receiving power\n";
+    report += "   → Relay failure on DM_WASH pin\n";
+    report += "   → Wiring issue\n\n";
+    report += "🔧 *Recommended Actions:*\n";
+    report += "1. Disconnect power and manually check drum rotation\n";
+    report += "2. Measure motor coil resistance\n";
+    report += "3. Check DM_WASH relay output with multimeter\n";
+    report += "4. Inspect motor mounting and bearings\n";
+    report += "5. Check for belt misalignment";
+  }
+  
+  telegram.sendMessage(CHAT_ID, report, "Markdown");
+}
+
+void drainMotorTest() {
+  String msg = "🔧 *DRAIN MOTOR TEST*\n\n";
+  msg += "This test checks if the drain motor brake releases properly.\n\n";
+  msg += "📋 *Instructions:*\n";
+  msg += "1. Motor brake will activate\n";
+  msg += "2. Try to rotate the drum by hand\n";
+  msg += "3. Press the hardware buttons:\n\n";
+  msg += "   ✅ *SPIN Button* - Drum rotates smoothly\n";
+  msg += "   ❌ *RINSE Button* - Drum is stuck/hard to turn\n\n";
+  msg += "⚡ Starting test in 5 seconds...";
+  
+  telegram.sendMessage(CHAT_ID, msg, "Markdown");
+  
+  // Activate drain motor (brake)
+  display.clear();
+  display.setCursor(0, 0);
+  display.print("Motor: ON");
+  display.setCursor(0, 1);
+  display.print("Try turning..");
+  
+  digitalWrite(DM_WASH, ON);
+  
+  String instructionMsg = "⚡ *DRAIN MOTOR ACTIVATED*\n\n";
+  instructionMsg += "🖐️ Now try to rotate the drum by hand.\n\n";
+  instructionMsg += "Press on the HARDWARE device:\n";
+  instructionMsg += "✅ SPIN button - Smooth rotation\n";
+  instructionMsg += "❌ RINSE button - Stuck/difficult\n\n";
+  instructionMsg += "Waiting for your input...";
+  
+  telegram.sendMessage(CHAT_ID, instructionMsg, "Markdown");
+  
+  // Set flag and wait for button response
+  awaitingDrainMotorResponse = true;
+  drainMotorTestResult = false;
+  
+  unsigned long waitStart = millis();
+  unsigned long timeout = 60000; // 60 second timeout
+  
+  // Wait for user to press button
+  while (awaitingDrainMotorResponse && (millis() - waitStart < timeout)) {
+    // Update display periodically
+    if ((millis() - waitStart) % 2000 < 100) {
+      display.setCursor(0, 1);
+      display.print("Waiting...      ");
+    }
+    delay(100);
+  }
+  
+  // Turn off motor
+  digitalWrite(DM_WASH, OFF);
+  
+  // Check if timeout occurred
+  if (!awaitingDrainMotorResponse) {
+    // User responded, generate report
+    generateDrainMotorReport(drainMotorTestResult);
+  } else {
+    // Timeout
+    display.clear();
+    display.setCursor(0, 0);
+    display.print("Test Timeout");
+    display.setCursor(0, 1);
+    display.print("No Response");
+    
+    telegram.sendMessage(CHAT_ID, "⏱️ *TEST TIMEOUT*\nNo button pressed within 60 seconds.\nTest cancelled.", "Markdown");
+    delay(2000);
+  }
+  
+  // Reset flag
+  awaitingDrainMotorResponse = false;
+  
+  // Return display to test mode
+  display.clear();
+  display.setCursor(1, 0);
+  display.print("  TEST MODE  ");
+  display.setCursor(1, 1);
+  display.print(" Engineering ");
+}
+
+/* ----------------  Drain Motor Test Logic  -------------------- */
+
+void performOutputTest() {
+  telegram.sendMessage(CHAT_ID, "⚡ Starting Output Test...\nEach output will be tested as per sequence.", "");
+  
+  String msg = "🔌 *OUTPUT TEST SEQUENCE*\n\n";
+  
+  // Test Inlet Valve
+  inletValveTest();
+  
+  // Test Drain Motors
+  drainMotorTest();
+
+  
+  msg += "3. Spin Drain Motor... ";
+  digitalWrite(DM_SPIN, ON);
+  delay(1000);
+  digitalWrite(DM_SPIN, OFF);
+  msg += "✅\n";
+  
+  // Test Inverter Power
+  msg += "4. Inverter Power... ";
+  digitalWrite(INV_PW, ON);
+  delay(1000);
+  digitalWrite(INV_PW, OFF);
+  msg += "✅\n";
+  
+  // Test Control Signal
+  msg += "5. Motor Control Signal (50 PWM)... ";
+  digitalWrite(INV_PW, ON);
+  analogWrite(CTR_SIG, 50);
+  delay(2000);
+  analogWrite(CTR_SIG, 0);
+  digitalWrite(INV_PW, OFF);
+  msg += "✅\n";
+  
+  // Test CO1 and CO2
+  msg += "6. Changeover Relay 1... ";
+  digitalWrite(CO1, ON);
+  delay(1000);
+  digitalWrite(CO1, OFF);
+  msg += "✅\n";
+  
+  msg += "7. Changeover Relay 2... ";
+  // digitalWrite(CO2, ON);
+  delay(1000);
+  // digitalWrite(CO2, OFF);
+  msg += "✅\n";
+  
+  msg += "\n✅ *All outputs tested successfully!*";
+  telegram.sendMessage(CHAT_ID, msg, "Markdown");
+}
+
+void performConnectivityTest() {
+  String msg = "🌐 *CONNECTIVITY TEST*\n\n";
+  
+  // WiFi Status
+  msg += "📶 WiFi: ";
+  if (wifiConnected) {
+    msg += "Connected ✅\n";
+    msg += "SSID: " + String(ssid) + "\n";
+    msg += "IP: " + WiFi.localIP().toString() + "\n";
+    msg += "RSSI: " + String(WiFi.RSSI()) + " dBm\n";
+  } else {
+    msg += "Disconnected ❌\n";
+  }
+  
+  // Telegram Test
+  msg += "\n📱 Telegram: ";
+  if (wifiConnected) {
+    msg += "Active ✅\n";
+    msg += "(You received this message!)\n";
+  } else {
+    msg += "Cannot test - No WiFi ❌\n";
+  }
+  
+  // Web Server
+  msg += "\n🌍 Web Server: ";
+  msg += wifiConnected ? "Running ✅" : "Offline ❌";
+  
+  telegram.sendMessage(CHAT_ID, msg, "Markdown");
+}
+
+void performCalibrationTest() {
+  String msg = "⚖️ *WATER LEVEL CALIBRATION*\n\n";
+  msg += "Current Settings:\n";
+  msg += "Multiplier: " + String(multiplier) + "\n";
+  msg += "Offset: " + String(offset) + "\n\n";
+  msg += "Current Reading: " + String(waterLevel, 2) + " L\n\n";
+  msg += "To recalibrate:\n";
+  msg += "1. Empty the tank completely\n";
+  msg += "2. Modify multiplier/offset in code\n";
+  msg += "3. Upload new firmware\n\n";
+  msg += "Raw sensor value: " + String(level.get_units(), 2);
+  
+  telegram.sendMessage(CHAT_ID, msg, "Markdown");
+}
+
+void sendSystemInfo() {
+  String msg = "ℹ️ *SYSTEM INFORMATION*\n\n";
+  
+  // Firmware version
+  msg += "🔧 Firmware: v1.0.0\n";
+  msg += "📅 Build: Oct 2025\n\n";
+  
+  // System uptime
+  unsigned long uptime = millis() / 1000;
+  int days = uptime / 86400;
+  int hours = (uptime % 86400) / 3600;
+  int minutes = (uptime % 3600) / 60;
+  int seconds = uptime % 60;
+  
+  msg += "⏱️ Uptime: ";
+  if (days > 0) msg += String(days) + "d ";
+  msg += String(hours) + "h " + String(minutes) + "m " + String(seconds) + "s\n\n";
+  
+  // Memory
+  msg += "💾 Free Heap: " + String(ESP.getFreeHeap()) + " bytes\n";
+  msg += "📦 Heap Size: " + String(ESP.getHeapSize()) + " bytes\n\n";
+  
+  // Program Status
+  msg += "🔄 Program Running: " + String(programRunning ? "YES" : "NO") + "\n";
+  msg += "🎯 Selected Mode: " + String(selectedMode) + "\n";
+  msg += "🔬 Simulation: " + String(isSimulation ? "ON" : "OFF") + "\n\n";
+  
+  // Last water usage
+  msg += "💧 *Last Water Usage:*\n";
+  msg += "Wash: " + String(washWaterUsed, 1) + " L\n";
+  msg += "Rinse: " + String(rinseWaterUsed, 1) + " L\n";
+  msg += "Total: " + String(totalWaterUsed, 1) + " L\n";
+  
+  telegram.sendMessage(CHAT_ID, msg, "Markdown");
+}
+
+void sendEngineeringMenu() {
+  String menu = "🔧 *ENGINEERING MODE ACTIVATED*\n\n";
+  menu += "Select an option:\n";
+  menu += "1️⃣ Sensor Test\n";
+  menu += "2️⃣ Output Test\n";
+  menu += "3️⃣ Connectivity Test\n";
+  menu += "4️⃣ Calibration\n";
+  menu += "5️⃣ System Info\n";
+  menu += "6️⃣ Exit Test Mode\n\n";
+  menu += "Send the number (1-6) to select";
+  
+  telegram.sendMessage(CHAT_ID, menu, "Markdown");
+}
+
+void enterEngineeringMode() {
+  if (programRunning) {
+    telegram.sendMessage(CHAT_ID, "❌ Cannot enter TEST MODE: Program is currently running!", "");
+    return;
+  }
+  
+  isTestMode = true;
+  testMenuOption = 0;
+  
+  // Update hardware display
+  display.clear();
+  display.setCursor(1, 0);
+  display.print("  TEST MODE  ");
+  display.setCursor(1, 1);
+  display.print(" Engineering ");
+  
+  // Send menu via Telegram
+  sendEngineeringMenu();
+  
+  Serial.println("Engineering Mode Activated");
+}
+
+void exitEngineeringMode() {
+  isTestMode = false;
+  
+  // Ensure all outputs are OFF
+  digitalWrite(INV_PW, OFF);
+  digitalWrite(DM_WASH, OFF);
+  digitalWrite(DM_SPIN, OFF);
+  digitalWrite(IV, OFF);
+  digitalWrite(CO1, OFF);
+  digitalWrite(CO2, OFF);
+  analogWrite(CTR_SIG, 0);
+  
+  // Update hardware display
+  display.clear();
+  displayPrint();
+  
+  telegram.sendMessage(CHAT_ID, "✅ Exited TEST MODE. Back to normal operation.", "");
+  Serial.println("Engineering Mode Exited");
+}
+
+
+void handleEngineeringMenu(String cmd) {
+  cmd.trim();
+  
+  if (cmd == "1") {
+    performSensorTest();
+  } 
+  else if (cmd == "2") {
+    performOutputTest();
+  }
+  else if (cmd == "3") {
+    performConnectivityTest();
+  }
+  else if (cmd == "4") {
+    performCalibrationTest();
+  }
+  else if (cmd == "5") {
+    sendSystemInfo();
+  }
+  else if (cmd == "menu" || cmd == "/menu") {
+    sendEngineeringMenu();
+  }
+  else {
+    telegram.sendMessage(CHAT_ID, "❓ Invalid option. Send a number 1-6 or 'menu' to see options again.", "");
+  }
+}
+
+void handleTelegramMessages() {
+  int numNewMessages = telegram.getUpdates(telegram.last_message_received + 1);
+  
+  for (int i = 0; i < numNewMessages; i++) {
+    String chat_id = String(telegram.messages[i].chat_id);
+    String text = telegram.messages[i].text;
+    
+    // Only respond to authorized chat ID
+    if (chat_id != CHAT_ID) {
+      continue;
+    }
+    
+    text.trim();
+    text.toLowerCase();
+    Serial.println(text);
+    delay(1000);
+    
+    // Enter Engineering Mode
+    if ((text == ENGINEERING_COMMAND || text == "/engineering") && !isTestMode) {
+      enterEngineeringMode();
+      continue;
+    }
+    
+    // Exit Engineering Mode
+    if (isTestMode && (text == ENGINEERING_EXIT || text == "/exit" || text == "6")) {
+      exitEngineeringMode();
+      continue;
+    }
+    
+    // Handle engineering menu options
+    if (isTestMode) {
+      handleEngineeringMenu(text);
+      continue;
+    }
+  }
+}
+
+
+/* ----------------  TEST CODEBLOCK AREA  -------------------- */
 
 void setup()
 {
@@ -917,14 +1377,6 @@ void setup()
 
   if (wifiConnected)
   {
-
-    // Define your devices here.
-    espalexa.addDevice(Device1, firstLightChanged); // simplest definition, default state off
-    espalexa.addDevice(Device2, secondLightChanged);
-    espalexa.addDevice(Device3, thirdLightChanged);
-    espalexa.addDevice(Device4, fourthLightChanged);
-    espalexa.addDevice(Device5, fifthLightChanged);
-    espalexa.begin();
     secured_client.setCACert(TELEGRAM_CERTIFICATE_ROOT);
     server.on("/", []()
               { server.send(200, "text/plain", "Hello From ATSystems Washing Machine!"); });
@@ -964,8 +1416,28 @@ void loop()
 {
   digitalWrite(WIFI_LED, wifiConnected ? ON : OFF);
   server.handleClient();
-  espalexa.loop();
   ElegantOTA.loop();
+
+ /* -------------------------Engineering Mode Check CodeBlock --------------------------- */
+
+  if (wifiConnected && (millis() - lastTelegramCheck > telegramCheckDelay)) {
+    handleTelegramMessages();
+    lastTelegramCheck = millis();
+  }
+  
+ 
+  if (isTestMode) {
+    display.setCursor(0, 0);
+    display.print("  TEST MODE  ");
+    display.setCursor(0, 1);
+    display.print(" Engineering ");
+    delay(100);
+    return; // Exit loop early
+  }
+
+/* -------------------------Engineering Mode Check Codeblock --------------------------- */
+
+
   if (buttonPressed)
   {
     buttonPressed = false;

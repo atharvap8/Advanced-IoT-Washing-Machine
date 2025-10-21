@@ -1,2 +1,2 @@
-idf_component_register(SRCS "main.cpp"
+idf_component_register(SRCS "program.cpp"
                     INCLUDE_DIRS ".")
